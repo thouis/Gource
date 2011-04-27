@@ -104,7 +104,7 @@ bool SVNCommitLog::parseCommit(RCommit& commit) {
         //if so find the first logentry tag
 
         bool found_logentry = false;
-        
+
         while(getNextLine(line)) {
             if(svn_logentry_start.match(line)) {
                 found_logentry = true;
@@ -112,7 +112,7 @@ bool SVNCommitLog::parseCommit(RCommit& commit) {
             }
         }
 
-        if(!found_logentry) return false;   
+        if(!found_logentry) return false;
     }
 
     //fprintf(stderr,"found logentry\n");
@@ -125,7 +125,7 @@ bool SVNCommitLog::parseCommit(RCommit& commit) {
     //fprintf(stderr,"found opening tag\n");
 
     bool endfound = false;
-    
+
     while(getNextLine(line)) {
         logentry.append(line);
         logentry.append("\n");
@@ -146,11 +146,11 @@ bool SVNCommitLog::parseCommit(RCommit& commit) {
     if(!doc.Parse(logentry.c_str())) return false;
 
     //fprintf(stderr,"try to parse logentry: %s\n", logentry.c_str());
-    
+
     TiXmlElement* leE = doc.FirstChildElement( "logentry" );
-    
+
     std::vector<std::string> entries;
-    
+
     if(!leE) return false;
 
     //parse date
@@ -162,7 +162,7 @@ bool SVNCommitLog::parseCommit(RCommit& commit) {
 
     if(!svn_logentry_timestamp.match(timestamp_str, &entries))
         return false;
-                    
+
     struct tm time_str;
 
     time_str.tm_year  = atoi(entries[0].c_str()) - 1900;
@@ -173,17 +173,17 @@ bool SVNCommitLog::parseCommit(RCommit& commit) {
     time_str.tm_sec   = atoi(entries[5].c_str());
     time_str.tm_isdst = -1;
 
-    commit.timestamp = mktime(&time_str);            
-   
+    commit.timestamp = mktime(&time_str);
+
     //parse author
     TiXmlElement* authorE = leE->FirstChildElement("author");
-    
+
     if(authorE != 0) {
-    
+
         std::string author(authorE->GetText());
 
         if(author.empty()) author = "Unknown";
-    
+
         commit.username = author;
     }
 
@@ -193,12 +193,15 @@ bool SVNCommitLog::parseCommit(RCommit& commit) {
     if(!pathsE) return true;
 
     //parse changes
-    
+
+    std::set<std::string> renames;
+
     for(TiXmlElement* pathE = pathsE->FirstChildElement("path"); pathE != 0; pathE = pathE->NextSiblingElement()) {
         //parse path
-        
-        const char* kind   = pathE->Attribute("kind");
-        const char* action = pathE->Attribute("action");
+
+        const char* kind      = pathE->Attribute("kind");
+        const char* action    = pathE->Attribute("action");
+        const char* copy_from = pathE->Attribute("copyfrom-path");
 
         //check for action
         if(action == 0) continue;
@@ -208,15 +211,15 @@ bool SVNCommitLog::parseCommit(RCommit& commit) {
         //if has the 'kind' attribute (old versions of svn dont have this), check if it is a dir
         if(kind != 0 && strcmp(kind,"dir") == 0) {
 
-            //accept only deletes for directories
-            if(strcmp(action, "D") != 0) continue;
+            //accept only deletes for directories or directory renames
+            if(strcmp(action, "D") != 0 || strcmp(action, "A") != 0 && copy_from != 0) continue;
 
             is_dir = true;
         }
 
         std::string file(pathE->GetText());
-        std::string status(action);       
-        
+        std::string status(action);
+
         if(file.empty()) continue;
         if(status.empty()) continue;
 
@@ -225,12 +228,38 @@ bool SVNCommitLog::parseCommit(RCommit& commit) {
             file = file + std::string("/");
         }
 
-        commit.addFile(file, status);
+        //SVN 'R' status does not mean Rename, its more like Replace
+        //treat as modify for now.
+        if(status == "R") status = "M";
+
+        if(status == "A" && copy_from != 0) {
+
+            std::string rename_from(copy_from);
+            status = "R";
+
+            if(is_dir && rename_from[rename_from.size()-1] != '/') {
+                rename_from = rename_from + std::string("/");
+            }
+
+            renames.insert(rename_from);
+
+            commit.addFile(rename_from, file, status);
+
+        } else if(status == "D") {
+
+            //if we've seen this filename as a rename, don't add the delete
+            if(renames.find(file) == renames.end()) {
+                commit.addFile(file, status);
+            }
+
+        } else {
+            commit.addFile(file, status);
+        }
     }
-    
+
     //fprintf(stderr,"parsed logentry\n");
 
     //read files
-    
+
     return true;
 }
